@@ -1,0 +1,157 @@
+-- non partition with indexes
+create table desttable (timeid integer,insid integer,indid integer,value integer);
+create unique index ix_desttable on desttable (timeid,indid,insid);
+create index brin_idx_desttable  on desttable using brin (timeid);
+load 'pg_directpaths';
+explain (COSTS OFF) insert into desttable select a % 50, a % 10000, a , a from generate_series(1,5000000) a order by 1,2,3;
+                      QUERY PLAN                      
+------------------------------------------------------
+ Insert on desttable
+   ->  Sort
+         Sort Key: ((a.a % 50)), ((a.a % 10000)), a.a
+         ->  Function Scan on generate_series a
+(4 rows)
+
+/*+ APPEND */ explain (COSTS OFF) insert into desttable select a % 50, a % 10000, a , a from generate_series(1,5000000) a order by 1,2,3;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ INSERT APPEND
+   ->  Insert on desttable
+         ->  Sort
+               Sort Key: ((a.a % 50)), ((a.a % 10000)), a.a
+               ->  Function Scan on generate_series a
+(5 rows)
+
+/*+ APPEND */ explain (COSTS OFF) insert into desttable values (30000000,10,10,10);
+        QUERY PLAN         
+---------------------------
+ INSERT APPEND
+   ->  Insert on desttable
+         ->  Result
+(3 rows)
+
+-- partition with indexes
+create table desttablep (timeid integer,insid integer,indid integer,value integer) PARTITION BY RANGE (timeid);
+create table desttablep_1 partition of desttablep for values from (1) to (2);
+create table desttablep_2 partition of desttablep for values from (2) to (3);
+/*+ APPEND */ explain (COSTS OFF) insert into desttablep values (1,10,10,10);
+      QUERY PLAN      
+----------------------
+ Insert on desttablep
+   ->  Result
+(2 rows)
+
+/*+ APPEND */ explain (COSTS OFF) insert into desttablep_1 values (1,10,10,10);
+          QUERY PLAN          
+------------------------------
+ INSERT APPEND
+   ->  Insert on desttablep_1
+         ->  Result
+(3 rows)
+
+/*+ APPEND */ insert into desttablep_1 values (1,10,10,10);
+select * from desttablep where timeid = 1;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+      1 |    10 |    10 |    10
+(1 row)
+
+-- triggers
+create table desttable2 as select * from desttable where 1 = 2;
+CREATE OR REPLACE FUNCTION insert_desttable2()
+RETURNS TRIGGER
+AS
+$$
+BEGIN
+INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid,NEW.insid,NEW.indid,NEW.value);
+RETURN NEW;
+END;
+$$ language plpgsql;
+CREATE TRIGGER trig1 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+CREATE TRIGGER trig2 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+insert into desttable values (1,10,10,10);
+select * from desttable;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+      1 |    10 |    10 |    10
+(1 row)
+
+select * from desttable2;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+      1 |    10 |    10 |    10
+      1 |    10 |    10 |    10
+(2 rows)
+
+truncate table desttable;
+truncate table desttable2;
+/*+ APPEND */ insert into desttable values (1,10,10,10);
+select * from desttable2;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+(0 rows)
+
+-- check constraint
+create table checkcons (a int, b int, c int check (c > 1));
+insert into checkcons values (1, 1, 1);
+ERROR:  new row for relation "checkcons" violates check constraint "checkcons_c_check"
+DETAIL:  Failing row contains (1, 1, 1).
+select * from checkcons;
+ a | b | c 
+---+---+---
+(0 rows)
+
+/*+ APPEND */ insert into checkcons values (1, 1, 1);
+select * from checkcons;
+ a | b | c 
+---+---+---
+ 1 | 1 | 1
+(1 row)
+
+-- toast
+SET default_toast_compression = 'pglz';
+create table toasttest(descr text, cnt int DEFAULT 0, f1 text, f2 text);
+insert INTO toasttest(descr, f1, f2) VALUES('two-toasted', repeat('1234567890',30000), repeat('1234567890',50000));
+select relname from pg_class where oid = (select reltoastrelid from pg_class where relname='toasttest');\gset
+    relname     
+----------------
+ pg_toast_16415
+(1 row)
+
+select substring(chunk_data::text, 1, 10)  from pg_toast.:relname;
+ substring  
+------------
+ \x20a10700
+ \xff0f0aff
+ \x0aff0f0a
+ \xe0930400
+ \xff0f0aff
+(5 rows)
+
+drop table toasttest;
+create table toasttest(descr text, cnt int DEFAULT 0, f1 text, f2 text);
+/*+ APPEND */ explain insert INTO toasttest(descr, f1, f2) VALUES('two-toasted', repeat('1234567890',30000), repeat('1234567890',50000));
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ INSERT APPEND
+   ->  Insert on toasttest  (cost=0.00..0.01 rows=0 width=0)
+         ->  Result  (cost=0.00..0.01 rows=1 width=100)
+(3 rows)
+
+/*+ APPEND */ insert INTO toasttest(descr, f1, f2) VALUES('two-toasted', repeat('1234567890',30000), repeat('1234567890',50000));
+select relname from pg_class where oid = (select reltoastrelid from pg_class where relname='toasttest');\gset
+    relname     
+----------------
+ pg_toast_16423
+(1 row)
+
+select substring(chunk_data::text, 1, 10)  from pg_toast.:relname;
+ substring  
+------------
+ \x20a10700
+ \xff0f0aff
+ \x0aff0f0a
+ \xe0930400
+ \xff0f0aff
+(5 rows)
+

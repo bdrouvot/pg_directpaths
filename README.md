@@ -9,12 +9,16 @@ Provide the following direct paths (means bypass shared buffers):
 ### Direct path insert 
 
 - data is written directly to the relation files, bypassing the shared buffers
-- skip WAL logging
+- data is written directly by chunks of 8MB
+- once the insert is finished new tuples are visible as if they would have been inserted through the standard insert
+- new tuples are not visible if the insert is aborted
+- WAL logging is done if the target relation is a logged one
+- WAL logging is done by writing the Full Page Images of the new pages
+- WAL logging is done by writing multiple Full Page Images in one operation
 
 # Status
 
-pg_directpaths is in public alpha status.  
-It is recommended for experiments, testing, etc., but is `not recommended for production usage`.
+pg_directpaths is in public alpha status (so currently recommended only for experiments, testing, etc.,) but is `not currently recommended for production usage`.
 
 ## Installation
 
@@ -100,9 +104,9 @@ postgres=# /*+ APPEND */ explain (COSTS OFF) insert into desttable select a % 50
 Time: 0.651 ms
 postgres=# /*+ APPEND */ insert into desttable select a % 50, a % 10000, a , a from generate_series(1,5000000) a;
 INSERT 0 5000000
-Time: 14191.560 ms (00:14.192)
+Time: 15475.834 ms (00:15.476)
 ```
- - Let's compare also with an unlogged table:
+ - Out of curiosity, let's compare the timing also with an unlogged table:
 
 ````
 postgres=# create unlogged table nologdesttable (timeid integer,insid integer,indid integer,value integer);
@@ -115,10 +119,42 @@ postgres=# insert into nologdesttable select a % 50, a % 10000, a , a from gener
 INSERT 0 5000000
 Time: 41303.905 ms (00:41.304)
 ````
- 
+## check the `APPEND` hint behavior within a transaction:
+- If the transaction is committed 
+````
+postgres=# truncate table desttable;
+TRUNCATE TABLE
+postgres=# begin;
+BEGIN
+postgres=*# /*+ APPEND */ insert into desttable select a % 50, a % 10000, a , a from generate_series(1,5000000) a;
+INSERT 0 5000000
+postgres=*# commit;
+COMMIT
+postgres=# select count(*) from desttable ;
+  count
+---------
+ 5000000
+(1 row)
+````
+- If the transaction is rolled back: 
+````
+postgres=# truncate table desttable;
+TRUNCATE TABLE
+postgres=# begin;
+BEGIN
+postgres=*# /*+ APPEND */ insert into desttable select a % 50, a % 10000, a , a from generate_series(1,5000000) a;
+INSERT 0 5000000
+postgres=*# rollback;
+ROLLBACK
+postgres=# select count(*) from desttable ;
+ count
+-------
+     0
+(1 row)
+````
 # Remarks
 
-- the hint is ignored if the insert is done on a partitioned table
+- the /*+ APPEND */ hint is ignored if the insert is done on a partitioned table
 - direct path is working if the insert is done directly on a partition
 - check constraints are ignored
 - no trigger processing is performed
@@ -126,17 +162,17 @@ Time: 41303.905 ms (00:41.304)
 - all the relation's indexes are rebuild (even if you direct path insert a single row)
 - [pg_bulkload](https://github.com/ossc-db/pg_bulkload) also provides direct path loading: part of pg_directpaths is inspired by it
 
-# Sum up the feature:
+# Sum up the features:
 
-| Feature | Supported PostgreSQL version | bypass shared buffers | write directly to the relation files | skip WAL logging | on partitions | rebuild indexes | explain |
+| Feature | Supported PostgreSQL version | bypass shared buffers | WAL Logging | write directly to the relation files | on partitions | rebuild indexes | explain |
 |:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
 | direct path insert| >=10 | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: | :white_check_mark: |
 
-# Areas of improvment (not sure at all if doable or not):
+# Areas of improvement:
 
-| Feature | enable WAL logging | on partitioned tables | incremental indexes update | fires triggers | others? |
-|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
-| direct path insert| :question: | :question: | :question: | :question: | :question: |
+| Feature | on partitioned tables | incremental indexes update | fires triggers | others? |
+|:-------------:|:-------------:|:-------------:|:-------------:|:-------------:|
+| direct path insert| :question: | :question: | :question: | :question: |
 
 # License
 

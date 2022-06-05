@@ -27,17 +27,21 @@
 #elif PG_VERSION_NUM >= PG_VERSION_13
 #include "corepg/nodeModifyTable_13.c"
 #include "access/heaptoast.h"
+#include "catalog/pg_control.h"
 #elif PG_VERSION_NUM >= PG_VERSION_12
 #include "corepg/nodeModifyTable_12.c"
 #include "access/tuptoaster.h"
+#include "catalog/pg_control.h"
 #elif PG_VERSION_NUM >= PG_VERSION_11
 #include "corepg/nodeModifyTable_11.c"
 #include "access/tuptoaster.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_control.h"
 #elif PG_VERSION_NUM >= PG_VERSION_10
 #include "corepg/nodeModifyTable_10.c"
 #include "access/tuptoaster.h"
 #include "catalog/catalog.h"
+#include "catalog/pg_control.h"
 #else
 #error unsupported PostgreSQL version
 #endif
@@ -55,17 +59,23 @@
 typedef struct InsertAppendWriter
 {
 	Relation		rel;	/* target relation */
-    char           *blocks; /* heap block buffer */
-    int             curblk; /* current block buffer */
+	char           *blocks; /* heap blocks buffer */
+	int             curblk; /* current block buffer */
 	BlockNumber blks_initial_cnt; /* initial number of blocks part of the relation */
 	BlockNumber blks_append_cnt;	/* number of blocks created by Insert Append */
 	int				datafd;		/* fd of relation file */
 	TransactionId	xid;
 	CommandId		cid;
+	BlockNumber ready_blknos[PAGES_COUNT]; /* to be used as parameter of log_newpages */
+	Page        ready_pages[PAGES_COUNT]; /* to be written in the WAL files */
 } InsertAppendWriter;
 
 static void close_relation_file(InsertAppendWriter *writer);
 static void flush_pages(InsertAppendWriter *writer);
+#if PG_VERSION_NUM < PG_VERSION_14
+static void log_newpages(RelFileNode *rnode, ForkNumber forkNum, int num_pages,
+             BlockNumber *blknos, Page *pages, bool page_std);
+#endif
 
 static void
 DirectWriterClose(InsertAppendWriter *writer, EState *estate, ResultRelInfo *resultRelInfo)
@@ -191,23 +201,6 @@ flush_pages(InsertAppendWriter *writer)
 		return;
 
 	/*
-	 * We need to write to the log the FPI of the first page to prevent the XID
-	 * to be reused later if recovery is needed.
-	 * Not doing so could potentialy make tuples that were direct append
-	 * just before a crash visibles (should the same reused XID be committed later on).
-	 */  
-	  
-	if (writer->blks_append_cnt == 0 && !RELATION_IS_LOCAL(writer->rel)
-			&& !(writer->rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED) )
-	{
-		XLogRecPtr	recptr;
-
-		recptr = log_newpage(&writer->rel->rd_node, MAIN_FORKNUM,
-			writer->blks_initial_cnt, writer->blocks, true);
-		
-		XLogFlush(recptr);
-	}
-	/*
 	 * Write pages.
 	 */
 	for (i = 0; i < num;)
@@ -232,21 +225,26 @@ flush_pages(InsertAppendWriter *writer)
 
 		Assert(flush_num > 0);
 
+		/*
+		 * If the relation is a logged one then write the new pages
+		 * in the WAL files.
+		 */
+		if (!RELATION_IS_LOCAL(writer->rel)
+			&& !(writer->rel->rd_rel->relpersistence == RELPERSISTENCE_UNLOGGED))
+		{
+			log_newpages(&writer->rel->rd_node, MAIN_FORKNUM, flush_num,
+							writer->ready_blknos, writer->ready_pages, true);
+		}
+
 		if (DataChecksumsEnabled())
 		{
-			Page	contained_page;
 			int		j;
-
 			/*
 			 * Write checksum for pages that are going to be written to the
-			 * current file.  We will be writing flush_num pages from the
-			 * block buffer starting at block offset i.
+			 * current file.
 			 */
 			for (j = 0; j < flush_num; j++)
-			{
-				contained_page = GetTargetPage(writer, i + j);
-				PageSetChecksumInplace(contained_page, BLKS_TOTAL_CNT(writer) + j);
-			}
+				PageSetChecksumInplace(writer->ready_pages[j], writer->ready_blknos[j]);
 		}	
 
 		writer->blks_append_cnt += flush_num;
@@ -347,6 +345,8 @@ IAExecInsert(ModifyTableState *mtstate,
 
 		/* initialize current block */
 		PageInit(page, BLCKSZ, 0);
+		writer->ready_blknos[writer->curblk] = writer->blks_initial_cnt + writer->blks_append_cnt + writer->curblk;
+		writer->ready_pages[writer->curblk] = page;
 	}
 
 	tuple->t_data->t_infomask &= ~(HEAP_XACT_MASK);
@@ -389,6 +389,7 @@ ExecInsertAppendTable(PlanState *pstate)
 	TupleTableSlot *slot;
 	TupleTableSlot *planSlot;
 	InsertAppendWriter *writer;
+	Page page;
 
 	CHECK_FOR_INTERRUPTS();
 
@@ -444,8 +445,10 @@ ExecInsertAppendTable(PlanState *pstate)
 	 */
 
 	writer = CreateDirectWriter(estate, resultRelInfo->ri_RelationDesc);
-
-    PageInit(GetCurrentPage(writer), BLCKSZ, 0);
+	page = GetCurrentPage(writer);
+	PageInit(page, BLCKSZ, 0);
+	writer->ready_blknos[0] = writer->blks_initial_cnt;
+	writer->ready_pages[0] = page;
 
 	for (;;)
 	{
@@ -600,3 +603,60 @@ ExecEndInsertAppendTable(PlanState *pstate)
 	ModifyTableState *node = castNode(ModifyTableState, pstate);
 	ExecEndModifyTable(node);
 }
+
+/*
+ * Copy of PostgreSQL 14 core log_newpages()
+ */
+#if PG_VERSION_NUM < PG_VERSION_14
+static void
+log_newpages(RelFileNode *rnode, ForkNumber forkNum, int num_pages,
+             BlockNumber *blknos, Page *pages, bool page_std)
+{
+    int         flags;
+    XLogRecPtr  recptr;
+    int         i;
+    int         j;
+
+    flags = REGBUF_FORCE_IMAGE;
+    if (page_std)
+        flags |= REGBUF_STANDARD;
+
+    /*
+     * Iterate over all the pages. They are collected into batches of
+     * XLR_MAX_BLOCK_ID pages, and a single WAL-record is written for each
+     * batch.
+     */
+    XLogEnsureRecordSpace(XLR_MAX_BLOCK_ID - 1, 0);
+
+    i = 0;
+    while (i < num_pages)
+    {
+        int         batch_start = i;
+        int         nbatch;
+
+        XLogBeginInsert();
+
+        nbatch = 0;
+        while (nbatch < XLR_MAX_BLOCK_ID && i < num_pages)
+        {
+            XLogRegisterBlock(nbatch, rnode, forkNum, blknos[i], pages[i], flags);
+            i++;
+            nbatch++;
+        }
+
+        recptr = XLogInsert(RM_XLOG_ID, XLOG_FPI);
+
+        for (j = batch_start; j < i; j++)
+        {
+            /*
+             * The page may be uninitialized. If so, we can't set the LSN
+             * because that would corrupt the page.
+             */
+            if (!PageIsNew(pages[j]))
+            {
+                PageSetLSN(pages[j], recptr);
+            }
+        }
+    }
+}
+#endif

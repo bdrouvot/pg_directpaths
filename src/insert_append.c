@@ -78,13 +78,13 @@ static void log_newpages(RelFileNode *rnode, ForkNumber forkNum, int num_pages,
 #endif
 
 static void
-DirectWriterClose(InsertAppendWriter *writer, EState *estate, ResultRelInfo *resultRelInfo)
+DirectWriterClose(InsertAppendWriter *writer, ResultRelInfo *resultRelInfo)
 {
 	Assert(writer != NULL);
 
 	flush_pages(writer);
 	close_relation_file(writer);
-	IARebuildIndexes(estate, resultRelInfo);
+	IARebuildIndexes(resultRelInfo);
 
 	if (writer->rel)
 #if PG_VERSION_NUM >= PG_VERSION_13
@@ -96,11 +96,11 @@ DirectWriterClose(InsertAppendWriter *writer, EState *estate, ResultRelInfo *res
 	if (writer->blocks)
 		pfree(writer->blocks);
 		
-	pfree(writer);	
+	pfree(writer);
 }
 
 static InsertAppendWriter *
-CreateDirectWriter(EState *estate, Relation rel)
+CreateDirectWriter(Relation rel)
 {
     InsertAppendWriter       *writer;
 
@@ -296,14 +296,31 @@ IAExecInsert(ModifyTableState *mtstate,
     ItemId          itemId;
     Item            item;
 	HeapTuple  tuple;
+	MemoryContext       query_mcxt = CurrentMemoryContext;
 
 	page = GetCurrentPage(writer);
 
 #if PG_VERSION_NUM >= PG_VERSION_12
-	tuple = ExecCopySlotHeapTuple(slot);
+	tuple = ExecFetchSlotHeapTuple(slot, false, NULL);
 #else
 	tuple = ExecMaterializeSlot(slot);
 #endif
+
+	/*
+	 * BEFORE ROW INSERT Triggers.
+	 *
+	 * Note: We fire BEFORE ROW TRIGGERS for every attempted insertion in an
+	 * INSERT ... ON CONFLICT statement.  We cannot check for constraint
+	 * violations before firing these triggers, because they can change the
+	 * values to insert.  Also, they can run arbitrary user-defined code with
+	 * side-effects that we can't cancel by just not inserting the tuple.
+	 */
+	if (returningRelInfo->ri_TrigDesc &&
+		returningRelInfo->ri_TrigDesc->trig_insert_before_row)
+	{
+		if (!ExecBRInsertTriggers(estate, returningRelInfo, slot))
+			return NULL;		/* "do nothing" */
+	}
 
     /* take care of toasted data if needed */
 	if (tuple->t_len > TOAST_TUPLE_THRESHOLD)
@@ -349,6 +366,9 @@ IAExecInsert(ModifyTableState *mtstate,
 		writer->ready_pages[writer->curblk] = page;
 	}
 
+	/* Switch to per tuple memory context */
+    MemoryContextSwitchTo(GetPerTupleMemoryContext(estate));
+
 	tuple->t_data->t_infomask &= ~(HEAP_XACT_MASK);
 	tuple->t_data->t_infomask2 &= ~(HEAP2_XACT_MASK);
 	tuple->t_data->t_infomask |= HEAP_XMAX_INVALID;
@@ -367,12 +387,23 @@ IAExecInsert(ModifyTableState *mtstate,
 
 	if (canSetTag)
 		(estate->es_processed)++;
-		
+
+	/* AFTER ROW INSERT Triggers */
+#if PG_VERSION_NUM >= PG_VERSION_12
+	/* Need to retrieve inserted tuple, so update the slot to do so */
+	slot->tts_tableOid = RelationGetRelid(returningRelInfo->ri_RelationDesc);
+	ItemPointerCopy(&tuple->t_self, &slot->tts_tid);
+	ExecARInsertTriggers(estate, returningRelInfo, slot, NIL, NULL);
+#else
+	ExecARInsertTriggers(estate, returningRelInfo, tuple, NIL, NULL);
+#endif
+
+	MemoryContextSwitchTo(query_mcxt);
 	return NULL;
 }
 
 /*
- * Modified version of PostgreSQL core ExecModifyTable.
+ * Modified version of PostgreSQL core ExecModifyTable().
  */
 TupleTableSlot *
 ExecInsertAppendTable(PlanState *pstate)
@@ -418,6 +449,15 @@ ExecInsertAppendTable(PlanState *pstate)
 	if (node->mt_done)
 		return NULL;
 
+	/*
+	 * On first call, fire BEFORE STATEMENT triggers before proceeding.
+	 */
+	if (node->fireBSTriggers)
+	{
+		fireBSTriggers(node);
+		node->fireBSTriggers = false;
+	}
+
 	/* Preload local variables */
 #if PG_VERSION_NUM >= PG_VERSION_14
 	resultRelInfo = node->resultRelInfo + node->mt_lastResultIndex;
@@ -444,7 +484,7 @@ ExecInsertAppendTable(PlanState *pstate)
 	 * for each row.
 	 */
 
-	writer = CreateDirectWriter(estate, resultRelInfo->ri_RelationDesc);
+	writer = CreateDirectWriter(resultRelInfo->ri_RelationDesc);
 	page = GetCurrentPage(writer);
 	PageInit(page, BLCKSZ, 0);
 	writer->ready_blknos[0] = writer->blks_initial_cnt;
@@ -509,7 +549,7 @@ ExecInsertAppendTable(PlanState *pstate)
                     node->mt_oc_transition_capture->tcs_map =
                         node->mt_transition_tupconv_maps[node->mt_whichplan];
                 }
-#endif
+#endif	// But we are still the PG_VERSION_NUM < PG_VERSION_14 case
 				continue;
 			}
 			else
@@ -525,7 +565,7 @@ ExecInsertAppendTable(PlanState *pstate)
 			planSlot = node->mt_scans[node->mt_whichplan];
 		}
 #endif
-#else
+#else // We are not in the PG_VERSION_NUM < PG_VERSION_14 case anymore
         /* No more tuples to process? */
         if (TupIsNull(planSlot))
             break;
@@ -552,7 +592,7 @@ ExecInsertAppendTable(PlanState *pstate)
                 resultRelInfo = ExecLookupResultRelByOid(node, resultoid,
                                                          false, true);
         }
-#endif
+#endif // Check on PG_VERSION_NUM is finished
 
 		EvalPlanQualSetSlot(&node->mt_epqstate, planSlot);
 		slot = planSlot;
@@ -585,12 +625,17 @@ ExecInsertAppendTable(PlanState *pstate)
 
 	}
 
-	DirectWriterClose(writer, estate, resultRelInfo);
+	DirectWriterClose(writer, resultRelInfo);
 
 #if PG_VERSION_NUM < PG_VERSION_14
 	/* Restore es_result_relation_info before exiting */
 	estate->es_result_relation_info = saved_resultRelInfo;
 #endif
+
+	/*
+	 * We're done, but fire AFTER STATEMENT triggers before exiting.
+	 */
+	fireASTriggers(node);
 
 	node->mt_done = true;
 

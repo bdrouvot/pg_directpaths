@@ -22,7 +22,7 @@
 #endif
 
 void
-IARebuildIndexes(EState *estate, ResultRelInfo *resultRelInfo)
+IARebuildIndexes(ResultRelInfo *resultRelInfo)
 {
 	int				i;
 	int				numIndices;

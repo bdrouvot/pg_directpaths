@@ -20,28 +20,58 @@ select * from desttablep where timeid = 1;
 
 -- triggers
 create table desttable2 as select * from desttable where 1 = 2;
+create table desttable3 as select * from desttable where 1 = 2;
 
 CREATE OR REPLACE FUNCTION insert_desttable2()
 RETURNS TRIGGER
 AS
 $$
 BEGIN
-INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid,NEW.insid,NEW.indid,NEW.value);
+RAISE NOTICE 'value of NEW.timeid : %', NEW.timeid;
+INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid * 2 ,NEW.insid,NEW.indid,NEW.value);
+RETURN NEW;
+END;
+$$ language plpgsql;
+
+CREATE OR REPLACE FUNCTION insert_desttable2_2()
+RETURNS TRIGGER
+AS
+$$
+BEGIN
+INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid,NEW.insid * 2,NEW.indid,NEW.value);
 RETURN NEW;
 END;
 $$ language plpgsql;
 
 CREATE TRIGGER trig1 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
-CREATE TRIGGER trig2 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+CREATE TRIGGER trig2 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2_2();
+CREATE TRIGGER trig3 AFTER INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+CREATE TRIGGER trig4 AFTER INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2_2();
+
+CREATE OR REPLACE FUNCTION insert_desttable3()
+RETURNS TRIGGER
+AS
+$$
+BEGIN
+INSERT INTO desttable3(timeid,insid,indid,value) VALUES(NEW.timeid * 2 ,NEW.insid,NEW.indid,NEW.value);
+RETURN NEW;
+END;
+$$ language plpgsql;
+
+CREATE TRIGGER trig5 BEFORE INSERT ON desttable2 FOR EACH ROW EXECUTE PROCEDURE insert_desttable3();
+CREATE TRIGGER trig6 AFTER INSERT ON desttable2 FOR EACH ROW EXECUTE PROCEDURE insert_desttable3();
 
 insert into desttable values (1,10,10,10);
 select * from desttable;
 select * from desttable2;
+select * from desttable3;
 
 truncate table desttable;
 truncate table desttable2;
+truncate table desttable3;
 /*+ APPEND */ insert into desttable values (1,10,10,10);
 select * from desttable2;
+select * from desttable3;
 
 -- check constraint
 create table checkcons (a int, b int, c int check (c > 1));

@@ -3,6 +3,6 @@
 
 #include "nodes/execnodes.h"
 
-extern void IARebuildIndexes(EState *estate, ResultRelInfo *resultRelInfo);
+extern void IARebuildIndexes(ResultRelInfo *resultRelInfo);
 
 #endif   /* IAINDEXES_H */

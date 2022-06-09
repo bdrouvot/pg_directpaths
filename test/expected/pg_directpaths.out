@@ -58,18 +58,44 @@ select * from desttablep where timeid = 1;
 
 -- triggers
 create table desttable2 as select * from desttable where 1 = 2;
+create table desttable3 as select * from desttable where 1 = 2;
 CREATE OR REPLACE FUNCTION insert_desttable2()
 RETURNS TRIGGER
 AS
 $$
 BEGIN
-INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid,NEW.insid,NEW.indid,NEW.value);
+RAISE NOTICE 'value of NEW.timeid : %', NEW.timeid;
+INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid * 2 ,NEW.insid,NEW.indid,NEW.value);
+RETURN NEW;
+END;
+$$ language plpgsql;
+CREATE OR REPLACE FUNCTION insert_desttable2_2()
+RETURNS TRIGGER
+AS
+$$
+BEGIN
+INSERT INTO desttable2(timeid,insid,indid,value) VALUES(NEW.timeid,NEW.insid * 2,NEW.indid,NEW.value);
 RETURN NEW;
 END;
 $$ language plpgsql;
 CREATE TRIGGER trig1 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
-CREATE TRIGGER trig2 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+CREATE TRIGGER trig2 BEFORE INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2_2();
+CREATE TRIGGER trig3 AFTER INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2();
+CREATE TRIGGER trig4 AFTER INSERT ON desttable FOR EACH ROW EXECUTE PROCEDURE insert_desttable2_2();
+CREATE OR REPLACE FUNCTION insert_desttable3()
+RETURNS TRIGGER
+AS
+$$
+BEGIN
+INSERT INTO desttable3(timeid,insid,indid,value) VALUES(NEW.timeid * 2 ,NEW.insid,NEW.indid,NEW.value);
+RETURN NEW;
+END;
+$$ language plpgsql;
+CREATE TRIGGER trig5 BEFORE INSERT ON desttable2 FOR EACH ROW EXECUTE PROCEDURE insert_desttable3();
+CREATE TRIGGER trig6 AFTER INSERT ON desttable2 FOR EACH ROW EXECUTE PROCEDURE insert_desttable3();
 insert into desttable values (1,10,10,10);
+NOTICE:  value of NEW.timeid : 1
+NOTICE:  value of NEW.timeid : 1
 select * from desttable;
  timeid | insid | indid | value 
 --------+-------+-------+-------
@@ -79,17 +105,52 @@ select * from desttable;
 select * from desttable2;
  timeid | insid | indid | value 
 --------+-------+-------+-------
-      1 |    10 |    10 |    10
-      1 |    10 |    10 |    10
-(2 rows)
+      2 |    10 |    10 |    10
+      1 |    20 |    10 |    10
+      2 |    10 |    10 |    10
+      1 |    20 |    10 |    10
+(4 rows)
+
+select * from desttable3;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+      4 |    10 |    10 |    10
+      4 |    10 |    10 |    10
+      2 |    20 |    10 |    10
+      2 |    20 |    10 |    10
+      4 |    10 |    10 |    10
+      4 |    10 |    10 |    10
+      2 |    20 |    10 |    10
+      2 |    20 |    10 |    10
+(8 rows)
 
 truncate table desttable;
 truncate table desttable2;
+truncate table desttable3;
 /*+ APPEND */ insert into desttable values (1,10,10,10);
+NOTICE:  value of NEW.timeid : 1
+NOTICE:  value of NEW.timeid : 1
 select * from desttable2;
  timeid | insid | indid | value 
 --------+-------+-------+-------
-(0 rows)
+      2 |    10 |    10 |    10
+      1 |    20 |    10 |    10
+      2 |    10 |    10 |    10
+      1 |    20 |    10 |    10
+(4 rows)
+
+select * from desttable3;
+ timeid | insid | indid | value 
+--------+-------+-------+-------
+      4 |    10 |    10 |    10
+      4 |    10 |    10 |    10
+      2 |    20 |    10 |    10
+      2 |    20 |    10 |    10
+      4 |    10 |    10 |    10
+      4 |    10 |    10 |    10
+      2 |    20 |    10 |    10
+      2 |    20 |    10 |    10
+(8 rows)
 
 -- check constraint
 create table checkcons (a int, b int, c int check (c > 1));
@@ -115,7 +176,7 @@ insert INTO toasttest(descr, f1, f2) VALUES('two-toasted', repeat('1234567890',3
 select relname from pg_class where oid = (select reltoastrelid from pg_class where relname='toasttest');\gset
     relname     
 ----------------
- pg_toast_16415
+ pg_toast_16425
 (1 row)
 
 select substring(chunk_data::text, 1, 10)  from pg_toast.:relname;
@@ -142,7 +203,7 @@ create table toasttest(descr text, cnt int DEFAULT 0, f1 text, f2 text);
 select relname from pg_class where oid = (select reltoastrelid from pg_class where relname='toasttest');\gset
     relname     
 ----------------
- pg_toast_16423
+ pg_toast_16433
 (1 row)
 
 select substring(chunk_data::text, 1, 10)  from pg_toast.:relname;

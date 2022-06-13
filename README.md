@@ -8,6 +8,7 @@ Provide the following direct paths (means bypass shared buffers):
 
 ### Direct path insert 
 
+- writes the data into brand new pages and appends them direcly into the relation files
 - data is written directly to the relation files, bypassing the shared buffers
 - data is written directly by chunks of 8MB
 - once the insert is finished new tuples are visible as if they would have been inserted through the standard insert

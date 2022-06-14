@@ -234,6 +234,7 @@ INSERT 0 1
 - check constraints are ignored
 - an access exlusive lock is acquired on the relation
 - all the relation's indexes are rebuild (even if you direct path insert a single row)
+- does not support logical decoding
 - [pg_bulkload](https://github.com/ossc-db/pg_bulkload) also provides direct path loading: part of pg_directpaths is inspired by it
 
 # Sum up the features

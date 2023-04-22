@@ -19,8 +19,12 @@
 #include "include/cscan.h"
 #include "include/insert_append_indexes.h"
 
-#if PG_VERSION_NUM >= PG_VERSION_15
+#if PG_VERSION_NUM >= PG_VERSION_16
 #error unsupported PostgreSQL version
+#elif PG_VERSION_NUM >= PG_VERSION_15
+#include "corepg/nodeModifyTable_15.c"
+#include "access/heaptoast.h"
+#include "access/xloginsert.h"
 #elif PG_VERSION_NUM >= PG_VERSION_14
 #include "corepg/nodeModifyTable_14.c"
 #include "access/heaptoast.h"

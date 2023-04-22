@@ -12,8 +12,10 @@
 
 #include "include/pg_directpaths.h"
 
-#if PG_VERSION_NUM >= PG_VERSION_15
+#if PG_VERSION_NUM >= PG_VERSION_16
 #error unsupported PostgreSQL version
+#elif PG_VERSION_NUM >= PG_VERSION_15
+#include "corepg/explain_15.c"
 #elif PG_VERSION_NUM >= PG_VERSION_14
 #include "corepg/explain_14.c"
 #elif PG_VERSION_NUM >= PG_VERSION_13

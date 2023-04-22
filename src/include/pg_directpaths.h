@@ -11,6 +11,7 @@
 #define PG_VERSION_13 130000
 #define PG_VERSION_14 140000
 #define PG_VERSION_15 150000
+#define PG_VERSION_16 160000
 
 #if PG_VERSION_NUM < PG_VERSION_10
 #error pg_directpaths does not support PostgreSQL 9 or earlier versions.
